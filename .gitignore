@@ -1,2 +1,7 @@
 .venv*
+.vscode*
+.pytest*
+__pycache__*
+
+
 

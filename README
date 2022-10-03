@@ -1,0 +1,24 @@
+
+Why is the system hanging? 
+There is some problem with creating too many connections on osx. Maybe there is a way to fix this
+using tcp_tw_reuse etc but I'm that would require making this work on linux
+
+Wire Protocol:
+Get Key
+<HEADER>
+<STR-GET>
+<STR-KEY>
+
+Set Key Value
+<HEADER>
+<STR-SET>
+<STR-KEY>
+<STR-VALUE>
+
+Pipelining:
+In the absence of non blocking sockets I'll implement pipelining using two threads. One sending on a connection and one receiving.
+
+
+
+
+
