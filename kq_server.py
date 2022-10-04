@@ -1,6 +1,8 @@
+import random
 import select
 import socket
 import time
+from collections import deque
 
 from constants import *
 from protocol import StreamingDecoder, encode_message
@@ -36,13 +38,14 @@ class KQServer:
         )
         print(f"server started on {(HOST, PORT)}")
         while True:
-            events = self._kq.control(None, 10, 10)
+            events = self._kq.control(None, 1000, 10)
             if not events:
                 print("no events to report")
             else:
                 for event in events:
                     if event.ident == self._sock.fileno():
                         conn, _ = self._sock.accept()
+                        conn.setblocking(0)
                         self._kq.control(
                             [
                                 select.kevent(
@@ -63,7 +66,7 @@ class KQServer:
                         )
                         self._conn_map[conn.fileno()] = conn
                         self._readers[conn.fileno()] = StreamingDecoder()
-                        self._write_q[conn.fileno()] = []
+                        self._write_q[conn.fileno()] = deque()
                     elif (
                         event.filter == select.KQ_FILTER_READ
                         and event.flags & select.KQ_EV_EOF != 0
@@ -104,19 +107,14 @@ class KQServer:
 
     def flush_writes(self, fileno):
         q = self._write_q[fileno]
-        conn = self._conn_map[fileno]
         n = self._write_capacity[fileno]
-        while q and n > 0:
-            item = q[0]
+        if q:
+            item = q.popleft()
             if len(item) > n:
-                conn.send(item[:n])
-                n = 0
-                q[0] = item[n:]
+                q.appendleft(item[n:])
+                self._conn_map[fileno].sendall(item[:n])
             else:
-                conn.send(item)
-                n -= len(item)
-                q = q[1:]
-        self._write_q[fileno] = q
+                self._conn_map[fileno].sendall(item)
 
 
 if __name__ == "__main__":
