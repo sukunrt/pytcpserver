@@ -1,0 +1,125 @@
+import select
+import socket
+import time
+
+from constants import *
+from protocol import StreamingDecoder, encode_message
+from store import KVServer
+
+
+class KQServer:
+
+    """
+    A single threaded kqueue server that serves multiple clients with pipelining etc
+    """
+
+    def __init__(self, host, port):
+        self._host = host
+        self._port = port
+        self._kq = None
+        self._sock = None
+        self._write_capacity = {}
+        self._write_q = {}
+        self._conn_map = {}
+        self._readers = {}
+
+    def serve(self, func):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((self._host, self._port))
+        sock.listen(5)
+        sock.setblocking(0)
+        self._sock = sock
+        self._kq = select.kqueue()
+        self._kq.control(
+            [select.kevent(sock, select.KQ_FILTER_READ, select.KQ_EV_ADD)], 0
+        )
+        print(f"server started on {(HOST, PORT)}")
+        while True:
+            events = self._kq.control(None, 10, 10)
+            if not events:
+                print("no events to report")
+            else:
+                for event in events:
+                    if event.ident == self._sock.fileno():
+                        conn, _ = self._sock.accept()
+                        self._kq.control(
+                            [
+                                select.kevent(
+                                    conn, select.KQ_FILTER_READ, select.KQ_EV_ADD
+                                )
+                            ],
+                            0,
+                        )
+                        self._kq.control(
+                            [
+                                select.kevent(
+                                    conn,
+                                    select.KQ_FILTER_WRITE,
+                                    select.KQ_EV_ADD | select.KQ_EV_CLEAR,
+                                ),
+                            ],
+                            0,
+                        )
+                        self._conn_map[conn.fileno()] = conn
+                        self._readers[conn.fileno()] = StreamingDecoder()
+                        self._write_q[conn.fileno()] = []
+                    elif (
+                        event.filter == select.KQ_FILTER_READ
+                        and event.flags & select.KQ_EV_EOF != 0
+                    ):
+                        conn = self._conn_map[event.ident]
+                        self._kq.control(
+                            [
+                                select.kevent(
+                                    conn, select.KQ_FILTER_READ, select.KQ_EV_DELETE
+                                )
+                            ],
+                            0,
+                        )
+                        self._kq.control(
+                            [
+                                select.kevent(
+                                    conn, select.KQ_FILTER_WRITE, select.KQ_EV_DELETE
+                                )
+                            ],
+                            0,
+                        )
+                        conn.close()
+                        self._write_capacity.pop(conn.fileno(), None)
+                        self._write_q.pop(conn.fileno(), None)
+                    elif event.filter == select.KQ_FILTER_READ:
+                        conn = self._conn_map[event.ident]
+                        data = conn.recv(event.data)
+                        reader = self._readers[event.ident]
+                        reader.add(data)
+                        while reader.ready():
+                            msg = reader.next()
+                            response = func(msg)
+                            self._write_q[event.ident].append(encode_message(*response))
+                        self.flush_writes(event.ident)
+                    elif event.filter == select.KQ_FILTER_WRITE:
+                        self._write_capacity[event.ident] = event.data
+                        self.flush_writes(event.ident)
+
+    def flush_writes(self, fileno):
+        q = self._write_q[fileno]
+        conn = self._conn_map[fileno]
+        n = self._write_capacity[fileno]
+        while q and n > 0:
+            item = q[0]
+            if len(item) > n:
+                conn.send(item[:n])
+                n = 0
+                q[0] = item[n:]
+            else:
+                conn.send(item)
+                n -= len(item)
+                q = q[1:]
+        self._write_q[fileno] = q
+
+
+if __name__ == "__main__":
+    kv_server = KVServer()
+    server = KQServer(HOST, PORT)
+    server.serve(kv_server.handle)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from base64 import decode
+from collections import deque
 from typing import Generator, List, Tuple
 
 VERSION = 1
@@ -52,6 +54,80 @@ def decode_message(s: bytes) -> List[str]:
             raise Exception(f"Failed to decode string {s}")
         items.append(s)
     return items
+
+
+class StreamingDecoder:
+
+    _WAITING_HEADER = 0
+    _WAITING_DATA = 1
+
+    def __init__(self):
+        self._buf = Buffer()
+        self._state = self._WAITING_HEADER
+        self._msgs = []
+        self._required = 0
+        self._header = None
+
+    def ready(self):
+        return bool(self._msgs)
+
+    def next(self):
+        return self._msgs.pop()
+
+    def add(self, s: bytes):
+        self._buf.add(s)
+        while True:
+            if self._state == self._WAITING_HEADER:
+                h = self._buf.get(HEADER_LEN)
+                if h is None:
+                    return
+                success, _, msg_len = decode_header(h)
+                if not success:
+                    raise Exception(f"invalid header {h}")
+                self._required = msg_len
+                self._state = self._WAITING_DATA
+                self._header = h
+            elif self._state == self._WAITING_DATA:
+                d = self._buf.get(self._required)
+                if d is None:
+                    return
+                msg = []
+                for success, s in _decode_string(d):
+                    if not success:
+                        raise Exception(f"Failed to decode string {s}")
+                    msg.append(s)
+                self._msgs.append(msg)
+                self._state = self._WAITING_HEADER
+                self._header = None
+                self._required = 0
+
+
+class Buffer:
+    def __init__(self):
+        self._buf = deque()
+        self._n = 0
+
+    def add(self, s):
+        self._buf.append(s)
+        self._n += len(s)
+
+    def get(self, n):
+        if self._n < n:
+            return None
+        cnt = 0
+        items = []
+        while cnt < n:
+            x = self._buf.popleft()
+            nn = len(x)
+            if nn + cnt > n:
+                items.append(x[: n - cnt])
+                self._buf.appendleft(x[n - cnt :])
+                break
+            else:
+                cnt += len(x)
+                items.append(x)
+        self._n -= n
+        return b"".join(items)
 
 
 def _encode_header(version, msg):
