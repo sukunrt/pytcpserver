@@ -46,51 +46,21 @@ class KQServer:
                     if event.ident == self._sock.fileno():
                         conn, _ = self._sock.accept()
                         conn.setblocking(0)
-                        self._kq.control(
-                            [
-                                select.kevent(
-                                    conn, select.KQ_FILTER_READ, select.KQ_EV_ADD
-                                )
-                            ],
-                            0,
-                        )
-                        self._kq.control(
-                            [
-                                select.kevent(
-                                    conn,
-                                    select.KQ_FILTER_WRITE,
-                                    select.KQ_EV_ADD | select.KQ_EV_CLEAR,
-                                ),
-                            ],
-                            0,
-                        )
+                        self._register(conn)
                         self._conn_map[conn.fileno()] = conn
                         self._readers[conn.fileno()] = StreamingDecoder()
                         self._write_q[conn.fileno()] = deque()
+                        self._write_capacity[conn.fileno()] = 0
                     elif (
                         event.filter == select.KQ_FILTER_READ
                         and event.flags & select.KQ_EV_EOF != 0
                     ):
                         conn = self._conn_map[event.ident]
-                        self._kq.control(
-                            [
-                                select.kevent(
-                                    conn, select.KQ_FILTER_READ, select.KQ_EV_DELETE
-                                )
-                            ],
-                            0,
-                        )
-                        self._kq.control(
-                            [
-                                select.kevent(
-                                    conn, select.KQ_FILTER_WRITE, select.KQ_EV_DELETE
-                                )
-                            ],
-                            0,
-                        )
+                        self._unregister(conn)
                         conn.close()
                         self._write_capacity.pop(conn.fileno(), None)
                         self._write_q.pop(conn.fileno(), None)
+                        self._conn_map.pop(conn.fileno(), None)
                     elif event.filter == select.KQ_FILTER_READ:
                         conn = self._conn_map[event.ident]
                         data = conn.recv(event.data)
@@ -100,10 +70,27 @@ class KQServer:
                             msg = reader.next()
                             response = func(msg)
                             self._write_q[event.ident].append(encode_message(*response))
-                        self.flush_writes(event.ident)
                     elif event.filter == select.KQ_FILTER_WRITE:
                         self._write_capacity[event.ident] = event.data
                         self.flush_writes(event.ident)
+
+    def _register(self, conn):
+        self._kq.control(
+            [
+                select.kevent(conn, select.KQ_FILTER_READ, select.KQ_EV_ADD),
+                select.kevent(conn, select.KQ_FILTER_WRITE, select.KQ_EV_ADD),
+            ],
+            0,
+        )
+
+    def _unregister(self, conn):
+        self._kq.control(
+            [
+                select.kevent(conn, select.KQ_FILTER_READ, select.KQ_EV_DELETE),
+                select.kevent(conn, select.KQ_FILTER_WRITE, select.KQ_EV_DELETE),
+            ],
+            0,
+        )
 
     def flush_writes(self, fileno):
         q = self._write_q[fileno]
