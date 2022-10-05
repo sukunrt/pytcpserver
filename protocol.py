@@ -64,15 +64,15 @@ class StreamingDecoder:
     def __init__(self):
         self._buf = Buffer()
         self._state = self._WAITING_HEADER
-        self._msgs = []
+        self._msgs = deque()
         self._required = 0
         self._header = None
 
     def ready(self):
-        return bool(self._msgs)
+        return len(self._msgs) > 0
 
     def next(self):
-        return self._msgs.pop()
+        return self._msgs.popleft()
 
     def add(self, s: bytes):
         self._buf.add(s)
@@ -108,7 +108,7 @@ class Buffer:
         self._n = 0
 
     def add(self, s):
-        self._buf.append(s)
+        self._buf.append(memoryview(s))
         self._n += len(s)
 
     def get(self, n):

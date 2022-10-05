@@ -45,63 +45,83 @@ class KQServer:
                 for event in events:
                     if event.ident == self._sock.fileno():
                         conn, _ = self._sock.accept()
-                        conn.setblocking(0)
                         self._register(conn)
-                        self._conn_map[conn.fileno()] = conn
-                        self._readers[conn.fileno()] = StreamingDecoder()
-                        self._write_q[conn.fileno()] = deque()
-                        self._write_capacity[conn.fileno()] = 0
                     elif (
                         event.filter == select.KQ_FILTER_READ
                         and event.flags & select.KQ_EV_EOF != 0
                     ):
                         conn = self._conn_map[event.ident]
                         self._unregister(conn)
-                        conn.close()
-                        self._write_capacity.pop(conn.fileno(), None)
-                        self._write_q.pop(conn.fileno(), None)
-                        self._conn_map.pop(conn.fileno(), None)
                     elif event.filter == select.KQ_FILTER_READ:
                         conn = self._conn_map[event.ident]
                         data = conn.recv(event.data)
-                        reader = self._readers[event.ident]
+                        reader = self._readers[conn.fileno()]
                         reader.add(data)
                         while reader.ready():
                             msg = reader.next()
                             response = func(msg)
                             self._write_q[event.ident].append(encode_message(*response))
+                            if len(self._write_q[event.ident]) == 1:
+                                self._register_write(conn)
                     elif event.filter == select.KQ_FILTER_WRITE:
                         self._write_capacity[event.ident] = event.data
                         self.flush_writes(event.ident)
 
     def _register(self, conn):
+        conn.setblocking(0)
         self._kq.control(
             [
                 select.kevent(conn, select.KQ_FILTER_READ, select.KQ_EV_ADD),
-                select.kevent(conn, select.KQ_FILTER_WRITE, select.KQ_EV_ADD),
             ],
             0,
         )
+        self._conn_map[conn.fileno()] = conn
+        self._readers[conn.fileno()] = StreamingDecoder()
+        self._write_q[conn.fileno()] = deque()
+        self._write_capacity[conn.fileno()] = 0
 
     def _unregister(self, conn):
         self._kq.control(
             [
                 select.kevent(conn, select.KQ_FILTER_READ, select.KQ_EV_DELETE),
-                select.kevent(conn, select.KQ_FILTER_WRITE, select.KQ_EV_DELETE),
             ],
             0,
+        )
+        if self._write_q[conn.fileno()]:
+            self._unregister_write(conn)
+        conn.close()
+        self._write_capacity.pop(conn.fileno(), None)
+        self._write_q.pop(conn.fileno(), None)
+        self._conn_map.pop(conn.fileno(), None)
+
+    def _register_write(self, conn):
+        self._kq.control(
+            [select.kevent(conn, select.KQ_FILTER_WRITE, select.KQ_EV_ADD)], 0
+        )
+
+    def _unregister_write(self, conn):
+        self._kq.control(
+            [select.kevent(conn, select.KQ_FILTER_WRITE, select.KQ_EV_DELETE)], 0
         )
 
     def flush_writes(self, fileno):
         q = self._write_q[fileno]
         n = self._write_capacity[fileno]
-        if q:
+        items = []
+        while q and n:
             item = q.popleft()
             if len(item) > n:
                 q.appendleft(item[n:])
-                self._conn_map[fileno].sendall(item[:n])
+                items.append(item[:n])
+                n = 0
             else:
-                self._conn_map[fileno].sendall(item)
+                items.append(item)
+                n -= len(item)
+        conn = self._conn_map[fileno]
+        conn.send(b"".join(items))
+        self._write_capacity[fileno] = n
+        if not q:
+            self._unregister_write(conn)
 
 
 if __name__ == "__main__":
