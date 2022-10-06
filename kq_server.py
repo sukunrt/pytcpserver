@@ -1,7 +1,5 @@
-import random
 import select
 import socket
-import time
 from collections import deque
 
 from constants import *
@@ -29,13 +27,13 @@ class KQServer:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((self._host, self._port))
-        sock.listen(5)
         sock.setblocking(0)
-        self._sock = sock
         self._kq = select.kqueue()
         self._kq.control(
             [select.kevent(sock, select.KQ_FILTER_READ, select.KQ_EV_ADD)], 0
         )
+        sock.listen(5)
+        self._sock = sock
         print(f"server started on {(HOST, PORT)}")
         while True:
             events = self._kq.control(None, 1000, 10)
